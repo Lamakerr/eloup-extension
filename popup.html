@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <title>ELOUP.GG</title>
+    <style>
+        body {
+            width: 300px;
+            margin: 0;
+            padding: 16px;
+            background: #101319;
+            color: #e8ebf1;
+            font-family: Inter, Arial, sans-serif;
+        }
+        h1 { margin: 0 0 4px; font-size: 15px; font-weight: 900; }
+        p { margin: 0 0 14px; font-size: 12px; color: #9aa1ad; line-height: 1.5; }
+        label { display: block; margin-bottom: 4px; font-size: 11px; font-weight: 700; color: #c3c9d4; }
+        input {
+            width: 100%;
+            box-sizing: border-box;
+            margin-bottom: 12px;
+            padding: 9px 11px;
+            border: 1px solid #2c313c;
+            border-radius: 10px;
+            background: #171a21;
+            color: #e8ebf1;
+            font-size: 12px;
+            font-family: ui-monospace, Consolas, monospace;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            border: 0;
+            border-radius: 10px;
+            background: #ccff00;
+            color: #101319;
+            font-size: 12px;
+            font-weight: 800;
+            cursor: pointer;
+        }
+        button:disabled { background: #2c313c; color: #9aa1ad; cursor: default; }
+        #status { margin-top: 10px; font-size: 11.5px; line-height: 1.5; color: #9aa1ad; min-height: 16px; }
+        #status.ok { color: #ccff00; }
+        #status.err { color: #ff8f8f; }
+        a { color: #ccff00; }
+    </style>
+</head>
+<body>
+    <h1>ELOUP.GG</h1>
+    <p>Токен — в настройках профиля на сайте, вкладка «Катки».</p>
+
+    <label for="token">Токен расширения</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="1|…">
+
+    <label for="server">Адрес сайта</label>
+    <input id="server" type="text" spellcheck="false" value="https://eloup.gg">
+
+    <button id="save">Сохранить и проверить</button>
+    <div id="status"></div>
+
+    <script src="popup.js"></script>
+</body>
+</html>
