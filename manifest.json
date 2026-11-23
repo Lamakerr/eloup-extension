@@ -1,8 +1,8 @@
 {
     "manifest_version": 3,
     "name": "ELOUP.GG — разбор каток FACEIT",
-    "version": "0.2.2",
-    "description": "Кнопка «Разобрать на ELOUP» на странице матча FACEIT: демка уедет на разбор сама — статистика, счёт и 2D-реплей.",
+    "version": "0.3.0",
+    "description": "Разбор каток FACEIT на ELOUP: кнопка в комнате матча, бейджи игроков ELOUP и быстрый разбор из истории матчей.",
     "permissions": ["storage"],
     "host_permissions": [
         "https://www.faceit.com/*",

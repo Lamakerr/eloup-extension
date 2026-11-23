@@ -1,8 +1,8 @@
-// Фоновый воркер расширения ELOUP (#258): транспортный агент.
-// Подписанную ссылку на демку добывает контент-скрипт на странице матча —
-// там живёт сессия FACEIT (демки — приватный ресурс, серверу ELOUP они
+// Фоновый воркер расширения ELOUP (#258, #288): транспортный агент.
+// Подписанную ссылку на демку добывает контент-скрипт на странице FACEIT —
+// там живёт сессия игрока (демки — приватный ресурс, серверу ELOUP они
 // недоступны). Фон только передаёт файл на eloup.gg кусками, не сохраняя
-// его на диск целиком: fetch → буфер 8 МиБ → POST.
+// его на диск целиком: fetch → буфер 16 МиБ → POST.
 
 const DEFAULT_SERVER = 'https://eloup.gg';
 
@@ -51,6 +51,42 @@ async function getState(matchId) {
     };
 }
 
+// Статусы матчей батчем — для кнопок в истории матчей: сервер принимает
+// до 20 идентификаторов за запрос
+async function getStates(matchIds) {
+    const ids = (matchIds || []).slice(0, 20).map(encodeURIComponent).join(',');
+    const { json, response } = await api(`/api/extension/state?match_ids=${ids}`);
+
+    if (response.status === 401) {
+        return { auth: false };
+    }
+
+    if (!response.ok) {
+        return { auth: true, error: json.error || `ELOUP ответил ${response.status}` };
+    }
+
+    return { auth: true, matches: json.matches || [] };
+}
+
+// Публичные профили ELOUP по никам десятки — для бейджей в комнате матча
+async function lookupPlayers(nicknames) {
+    const { json, response } = await api('/api/extension/players/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nicknames: (nicknames || []).slice(0, 10) }),
+    });
+
+    if (response.status === 401) {
+        return { auth: false };
+    }
+
+    if (!response.ok) {
+        return { auth: true, error: json.error || `ELOUP ответил ${response.status}` };
+    }
+
+    return { auth: true, players: json.players || [] };
+}
+
 // ---- Свежая подпись ссылки -------------------------------------------------
 
 // Ссылки FACEIT на демки подписанные и живут ~5 минут (X-Amz-Expires=299),
@@ -73,7 +109,11 @@ async function report(tabId, state) {
     }
 }
 
-async function transfer(matchId, tabId, link) {
+async function transfer(matchId, tabId, link, focusNickname) {
+    // Прогресс уходит с идентификатором матча: в истории матчей по нему
+    // находится строка, в комнате — кнопка
+    const notify = (state) => report(tabId, { ...state, matchId });
+
     const state = await getState(matchId);
 
     if (!state.auth) {
@@ -86,12 +126,12 @@ async function transfer(matchId, tabId, link) {
 
     if (state.known) {
         // Матч уже на ELOUP — открываем готовый разбор
-        report(tabId, { phase: 'done', url: state.known.url });
+        notify({ phase: 'done', url: state.known.url });
 
         return;
     }
 
-    report(tabId, { phase: 'download', percent: 0 });
+    notify({ phase: 'download', percent: 0 });
 
     // Подписанный URL публичный (S3 + подпись в query) — куки FACEIT не нужны
     const response = await fetch(link);
@@ -136,7 +176,7 @@ async function transfer(matchId, tabId, link) {
 
             received += value.length;
 
-            report(tabId, { phase: 'download', percent: Math.round((received / total) * 100) });
+            notify({ phase: 'download', percent: Math.round((received / total) * 100) });
 
             let cursor = 0;
 
@@ -163,6 +203,10 @@ async function transfer(matchId, tabId, link) {
         // Полный размер файла, а не сколько скачано: сервер закрывает передачу,
         // когда сумма кусков доходит до него
         form.append('total_size', String(total));
+        // Ник FACEIT из комнаты — фокус разбора (см. myMatchNickname в content.js)
+        if (focusNickname) {
+            form.append('focus_nickname', focusNickname);
+        }
         form.append('chunk', new Blob([buffer.subarray(0, filled)]));
 
         const { response: r, json } = await api('/api/extension/demos', { method: 'POST', body: form });
@@ -195,7 +239,7 @@ async function transfer(matchId, tabId, link) {
         if (chunk.filled > 0) {
             send = flush(chunk.buffer, chunk.filled);
 
-            report(tabId, { phase: 'upload', percent: Math.round(((offset + chunk.filled) / total) * 100) });
+            notify({ phase: 'upload', percent: Math.round(((offset + chunk.filled) / total) * 100) });
         }
 
         if (chunk.last) {
@@ -206,7 +250,7 @@ async function transfer(matchId, tabId, link) {
     const result = await send;
 
     if (result.done) {
-        report(tabId, { phase: 'done', url: result.url });
+        notify({ phase: 'done', url: result.url });
 
         return;
     }
@@ -216,7 +260,7 @@ async function transfer(matchId, tabId, link) {
     const check = await getState(matchId);
 
     if (check.known) {
-        report(tabId, { phase: 'done', url: check.known.url });
+        notify({ phase: 'done', url: check.known.url });
 
         return;
     }
@@ -233,6 +277,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
 
+    if (message?.type === 'eloup-check-many') {
+        getStates(message.matchIds).then(sendResponse);
+
+        return true;
+    }
+
+    if (message?.type === 'eloup-lookup') {
+        lookupPlayers(message.nicknames).then(sendResponse);
+
+        return true;
+    }
+
     if (message?.type === 'eloup-analyze') {
         if (busy) {
             sendResponse({ error: 'Демка уже передаётся — дождитесь её' });
@@ -243,17 +299,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         busy = true;
         const tabId = sender?.tab?.id ?? null;
 
-        transfer(message.matchId, tabId, message.downloadUrl)
+        transfer(message.matchId, tabId, message.downloadUrl, message.focusNickname || null)
             .catch(async (e) => {
                 // Сдвиг куска: один рестарт с чистым идентификатором и свежей
                 // подписью FACEIT, дальше — ошибка
                 if (e.restart) {
-                    return transfer(message.matchId, tabId, await resign(tabId, message.matchId));
+                    return transfer(message.matchId, tabId, await resign(tabId, message.matchId), message.focusNickname || null);
                 }
 
                 throw e;
             })
-            .catch((e) => report(tabId, { phase: 'error', message: String(e.message || e) }))
+            .catch((e) => report(tabId, { phase: 'error', message: String(e.message || e), matchId: message.matchId }))
             .finally(() => { busy = false; });
 
         sendResponse({ started: true });
