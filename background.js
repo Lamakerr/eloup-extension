@@ -108,19 +108,53 @@ async function transfer(matchId, tabId, link) {
         throw new Error('CDN FACEIT не отдал размер демки — сообщите в ELOUP');
     }
 
-    const chunkSize = Math.min(state.upload?.chunk_size || 8 * 1024 * 1024, 8 * 1024 * 1024);
+    const chunkSize = Math.min(state.upload?.chunk_size || 16 * 1024 * 1024, 32 * 1024 * 1024);
     const maxBytes = state.upload?.max_bytes || 1024 * 1024 * 1024;
 
     const uploadId = crypto.randomUUID();
     const reader = response.body.getReader();
 
-    let buffer = new Uint8Array(chunkSize);
-    let filled = 0;
     let received = 0;
     let offset = 0;
-    let sent = false;
 
-    const flush = async () => {
+    // Один чанк из сети: буфер наполняется до границы chunkSize, на конце
+    // потока возвращается last=true
+    const fill = async () => {
+        const buffer = new Uint8Array(chunkSize);
+        let filled = 0;
+
+        while (filled < chunkSize) {
+            const { done, value } = await reader.read();
+
+            if (done) {
+                return { buffer, filled, last: true };
+            }
+
+            if (received + value.length > maxBytes) {
+                throw new Error('Демка больше лимита ELOUP');
+            }
+
+            received += value.length;
+
+            report(tabId, { phase: 'download', percent: Math.round((received / total) * 100) });
+
+            let cursor = 0;
+
+            while (cursor < value.length) {
+                const take = Math.min(chunkSize - filled, value.length - cursor);
+
+                buffer.set(value.subarray(cursor, cursor + take), filled);
+                filled += take;
+                cursor += take;
+
+                if (filled === chunkSize) {
+                    return { buffer, filled, last: false };
+                }
+            }
+        }
+    };
+
+    const flush = async (buffer, filled) => {
         const form = new FormData();
 
         form.append('match_id', matchId);
@@ -144,69 +178,50 @@ async function transfer(matchId, tabId, link) {
         }
 
         offset += filled;
-        buffer = new Uint8Array(chunkSize);
-        filled = 0;
-        sent = true;
 
         return json;
     };
 
-    while (true) {
-        const { done, value } = await reader.read();
+    // Конвейер: пока чанк едет на ELOUP, сеть уже читает следующий — TTL
+    // подписи FACEIT (299 с) тратится на работу, а не на простой сети
+    let send = Promise.resolve({ done: false });
 
-        if (done) {
+    while (true) {
+        const chunk = await fill();
+
+        // POST'ы идут строго по порядку смещений — ждём предыдущий
+        await send;
+
+        if (chunk.filled > 0) {
+            send = flush(chunk.buffer, chunk.filled);
+
+            report(tabId, { phase: 'upload', percent: Math.round(((offset + chunk.filled) / total) * 100) });
+        }
+
+        if (chunk.last) {
             break;
         }
-
-        if (received + value.length > maxBytes) {
-            throw new Error('Демка больше лимита ELOUP');
-        }
-
-        received += value.length;
-
-        if (total) {
-            report(tabId, { phase: 'download', percent: Math.round((received / total) * 100) });
-        }
-
-        let cursor = 0;
-
-        while (cursor < value.length) {
-            const take = Math.min(chunkSize - filled, value.length - cursor);
-
-            buffer.set(value.subarray(cursor, cursor + take), filled);
-            filled += take;
-            cursor += take;
-
-            if (filled === chunkSize) {
-                const result = await flush();
-
-                report(tabId, { phase: 'upload', percent: Math.round((offset / Math.max(received, 1)) * 100) });
-
-                if (result.done) {
-                    report(tabId, { phase: 'done', url: result.url });
-
-                    return;
-                }
-            }
-        }
     }
 
-    if (filled === 0 && sent) {
-        // Файл уложился ровно в границу куска: сервер уже закрыл передачу
-        const check = await getState(matchId);
+    const result = await send;
 
-        if (check.known) {
-            report(tabId, { phase: 'done', url: check.known.url });
+    if (result.done) {
+        report(tabId, { phase: 'done', url: result.url });
 
-            return;
-        }
-
-        throw new Error('Передача оборвалась — нажмите кнопку ещё раз');
+        return;
     }
 
-    const result = await flush();
+    // Сервер не закрыл передачу (например, файл лёг ровно в границу куска,
+    // а хвостового чанка не было) — сверяемся по состоянию матча
+    const check = await getState(matchId);
 
-    report(tabId, { phase: 'done', url: result.url });
+    if (check.known) {
+        report(tabId, { phase: 'done', url: check.known.url });
+
+        return;
+    }
+
+    throw new Error('Передача оборвалась — нажмите кнопку ещё раз');
 }
 
 // ---- Шина сообщений -------------------------------------------------------
