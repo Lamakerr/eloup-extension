@@ -101,6 +101,13 @@ async function transfer(matchId, tabId, link) {
     }
 
     const total = Number(response.headers.get('content-length')) || 0;
+
+    if (!total) {
+        // total_size — это Content-Length: сервер по нему узнаёт, что файл
+        // доехал целиком (без него первый же чанк «закрыл» бы передачу)
+        throw new Error('CDN FACEIT не отдал размер демки — сообщите в ELOUP');
+    }
+
     const chunkSize = Math.min(state.upload?.chunk_size || 8 * 1024 * 1024, 8 * 1024 * 1024);
     const maxBytes = state.upload?.max_bytes || 1024 * 1024 * 1024;
 
@@ -119,7 +126,9 @@ async function transfer(matchId, tabId, link) {
         form.append('match_id', matchId);
         form.append('upload_id', uploadId);
         form.append('offset', String(offset));
-        form.append('total_size', String(received));
+        // Полный размер файла, а не сколько скачано: сервер закрывает передачу,
+        // когда сумма кусков доходит до него
+        form.append('total_size', String(total));
         form.append('chunk', new Blob([buffer.subarray(0, filled)]));
 
         const { response: r, json } = await api('/api/extension/demos', { method: 'POST', body: form });
