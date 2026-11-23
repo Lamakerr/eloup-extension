@@ -1,22 +1,10 @@
 // Фоновый воркер расширения ELOUP (#258): транспортный агент.
-// Качает демку FACEIT с сессией игрока (демки — приватный ресурс, серверу
-// ELOUP они недоступны) и передаёт её на eloup.gg кусками, не сохраняя файл
-// на диск целиком: fetch → буфер 8 МиБ → POST.
+// Подписанную ссылку на демку добывает контент-скрипт на странице матча —
+// там живёт сессия FACEIT (демки — приватный ресурс, серверу ELOUP они
+// недоступны). Фон только передаёт файл на eloup.gg кусками, не сохраняя
+// его на диск целиком: fetch → буфер 8 МиБ → POST.
 
 const DEFAULT_SERVER = 'https://eloup.gg';
-
-// Кандидаты эндпоинтов ссылки на демку (уточнены разведкой, см. README):
-// пробуем по очереди, берём первый ответивший адресом
-const DEMO_LINK_SOURCES = [
-    {
-        url: (matchId) => `https://api.faceit.com/demos/v1/download-link?match_id=${matchId}`,
-        pick: (json) => json?.download_link ?? json?.payload?.download_link ?? null,
-    },
-    {
-        url: (matchId) => `https://api.faceit.com/match/v2/match/${matchId}`,
-        pick: (json) => json?.payload?.demo_url ?? json?.demo_url ?? null,
-    },
-];
 
 // Одна передача за раз: параллельные загрузки демок не нужны
 let busy = false;
@@ -63,28 +51,18 @@ async function getState(matchId) {
     };
 }
 
-// ---- Ссылка на демку ------------------------------------------------------
+// ---- Свежая подпись ссылки -------------------------------------------------
 
-async function demoLink(matchId) {
-    for (const source of DEMO_LINK_SOURCES) {
-        try {
-            const response = await fetch(source.url(matchId), { credentials: 'include', headers: { Accept: 'application/json' } });
+// Ссылки FACEIT на демки подписанные и живут ~5 минут (X-Amz-Expires=299),
+// поэтому при повторной передаче подпись запрашивается у страницы матча заново.
+async function resign(tabId, matchId) {
+    const link = await chrome.tabs.sendMessage(tabId, { type: 'eloup-resign', matchId });
 
-            if (!response.ok) {
-                continue;
-            }
-
-            const link = source.pick(await response.json().catch(() => null));
-
-            if (link) {
-                return link;
-            }
-        } catch {
-            // Следующий кандидат — вдруг этот эндпоинт у FACEIT переименовали
-        }
+    if (!link || link.error) {
+        throw new Error(link?.error || 'Не удалось обновить ссылку на демку — нажмите кнопку ещё раз');
     }
 
-    throw new Error('FACEIT не отдал ссылку на демку. Убедитесь, что вы вошли на faceit.com и демка матча доступна');
+    return link;
 }
 
 // ---- Передача демки -------------------------------------------------------
@@ -95,7 +73,7 @@ async function report(tabId, state) {
     }
 }
 
-async function transfer(matchId, tabId) {
+async function transfer(matchId, tabId, link) {
     const state = await getState(matchId);
 
     if (!state.auth) {
@@ -113,16 +91,13 @@ async function transfer(matchId, tabId) {
         return;
     }
 
-    report(tabId, { phase: 'link' });
-
-    const link = await demoLink(matchId);
-
     report(tabId, { phase: 'download', percent: 0 });
 
-    const response = await fetch(link, { credentials: 'include' });
+    // Подписанный URL публичный (S3 + подпись в query) — куки FACEIT не нужны
+    const response = await fetch(link);
 
     if (!response.ok || !response.body) {
-        throw new Error(`FACEIT не отдал демку (${response.status})`);
+        throw new Error(`CDN FACEIT не отдал демку (${response.status}) — ссылка живёт 5 минут, нажмите кнопку ещё раз`);
     }
 
     const total = Number(response.headers.get('content-length')) || 0;
@@ -244,13 +219,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         busy = true;
         const tabId = sender?.tab?.id ?? null;
 
-        transfer(message.matchId, tabId)
+        transfer(message.matchId, tabId, message.downloadUrl)
             .catch(async (e) => {
-                // Сдвиг куска: один рестарт с чистым идентификатором, дальше — ошибка
+                // Сдвиг куска: один рестарт с чистым идентификатором и свежей
+                // подписью FACEIT, дальше — ошибка
                 if (e.restart) {
-                    report(tabId, { phase: 'link' });
-
-                    return transfer(message.matchId, tabId);
+                    return transfer(message.matchId, tabId, await resign(tabId, message.matchId));
                 }
 
                 throw e;

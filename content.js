@@ -8,6 +8,65 @@ const MATCH_URL = /\/cs2\/room\/(1-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 const SETTINGS_URL = 'https://eloup.gg/profile/settings/premier';
 
+// ---- Подписанная ссылка на демку (разведка 23.11, детали в README) ---------
+
+// В данных матча лежит неподписанный resourceUrl (его хост намеренно не
+// резолвится), а подписывается он POST-ом download-url с куками сессии.
+// Запросы идут со страницы матча — same-origin, родные куки, referer и origin,
+// максимально похоже на поведение самого сайта.
+
+async function resourceUrl(matchId) {
+    const response = await fetch(`https://api.faceit.com/match/v2/match/${matchId}`, {
+        credentials: 'include',
+        headers: { Accept: 'application/json' },
+    });
+
+    if (!response.ok) {
+        throw new Error(`FACEIT не отдал данные матча (${response.status})`);
+    }
+
+    const payload = (await response.json().catch(() => null))?.payload || {};
+    const link = payload.demo_url ?? payload.demoUrl ?? payload.demoUrls?.[0] ?? payload.demoURLs?.[0] ?? null;
+
+    if (!link) {
+        throw new Error('В данных матча нет демки — она ещё не обработана или недоступна');
+    }
+
+    return link;
+}
+
+async function signedDemoUrl(matchId) {
+    // Сайт прикладает заголовок x-faceit-captcha-token (Cloudflare Turnstile).
+    // Первый прогон идёт без него: если FACEIT отвечает 403 — сюда добавится
+    // инжект Turnstile из main world (README, «Капча»).
+    const response = await fetch('https://www.faceit.com/api/download/v2/demos/download-url', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+            Accept: 'application/json+camelcase',
+            'Content-Type': 'application/json',
+            'faceit-referer': 'web-next',
+        },
+        body: JSON.stringify({ resourceUrl: await resourceUrl(matchId) }),
+    });
+
+    if (response.status === 403) {
+        throw new Error('FACEIT требует капчу для ссылки на демку — сообщите в ELOUP');
+    }
+
+    if (!response.ok) {
+        throw new Error(`FACEIT не подписал ссылку на демку (${response.status})`);
+    }
+
+    const url = (await response.json().catch(() => null))?.payload?.downloadUrl;
+
+    if (!url) {
+        throw new Error('FACEIT не подписал ссылку на демку — попробуйте ещё раз');
+    }
+
+    return url;
+}
+
 let host = null;
 let shadow = null;
 let currentMatch = null;
@@ -78,14 +137,27 @@ function buildButton() {
         <a target="_blank" rel="noopener"></a>
     `;
 
-    button().addEventListener('click', () => {
+    button().addEventListener('click', async () => {
         if (!currentMatch) {
             return;
         }
 
-        setBusy('Готовим…');
+        setBusy('Получаем ссылку…');
 
-        chrome.runtime.sendMessage({ type: 'eloup-analyze', matchId: currentMatch }, (response) => {
+        let downloadUrl;
+
+        try {
+            downloadUrl = await signedDemoUrl(currentMatch);
+        } catch (e) {
+            setText(String(e.message || e));
+            setTimeout(() => reset(), 6000);
+
+            return;
+        }
+
+        setBusy('Качаем демку… 0%');
+
+        chrome.runtime.sendMessage({ type: 'eloup-analyze', matchId: currentMatch, downloadUrl }, (response) => {
             if (chrome.runtime.lastError) {
                 return;
             }
@@ -129,8 +201,21 @@ function reset() {
     }
 }
 
-// Статусы передачи от фонового воркера
-chrome.runtime.onMessage.addListener((message) => {
+// Статусы передачи от фонового воркера и запросы свежей подписи (TTL ссылки — 5 минут)
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === 'eloup-resign') {
+        if (message.matchId !== currentMatch) {
+            sendResponse({ error: 'Вкладка матча уже закрыта — откройте её и попробуйте снова' });
+        } else {
+            setBusy('Обновляем ссылку…');
+            signedDemoUrl(message.matchId)
+                .then(sendResponse)
+                .catch((e) => sendResponse({ error: String(e.message || e) }));
+        }
+
+        return true; // ответ уйдёт асинхронно
+    }
+
     if (!message?.type || message.type !== 'eloup-progress' || !host) {
         return;
     }
