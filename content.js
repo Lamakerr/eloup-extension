@@ -13,7 +13,7 @@
 // Стили — в shadow DOM, чтобы не конфликтовать со страницей.
 
 const MATCH_URL = /\/cs2\/room\/(1-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
-const HISTORY_URL = /\/players\/[^/]+\/stats\//;
+const HISTORY_URL = /\/players\/[^/]+\/(stats\/|cs2\/history)/;
 const SETTINGS_URL = 'https://eloup.gg/profile/settings/premier';
 
 const MATCH_TTL = 10 * 60 * 1000; // JSON матча: ростер для бейджей, ссылка на демку
@@ -89,7 +89,11 @@ async function matchPayload(matchId) {
 
 async function resourceUrl(matchId) {
     const payload = await matchPayload(matchId);
+    // Поля из разведки 23.11 (demoUrl/demoUrls — camelCase с Accept json+camelcase)
     const link = payload.demo_url
+        || payload.demoUrl
+        || payload.demoUrls?.[0]
+        || payload.demoURLs?.[0]
         || payload.demo_download_url
         || payload.assets?.['demo-url']
         || payload.assets?.vpgame?.demo;
@@ -107,8 +111,14 @@ async function signPost(resource) {
     const response = await fetch('https://www.faceit.com/api/download/v2/demos/download-url', {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ resource }),
+        headers: {
+            'Content-Type': 'application/json',
+            // Так подписывает сам сайт (разведка 23.11): без faceit-referer
+            // и camelcase-акцепта эндпойнт ведёт себя непредсказуемо
+            Accept: 'application/json+camelcase',
+            'faceit-referer': 'web-next',
+        },
+        body: JSON.stringify({ resourceUrl: resource }),
     });
 
     if (response.status === 403) {
@@ -119,7 +129,7 @@ async function signPost(resource) {
         throw new Error(`FACEIT не подписал ссылку (${response.status})`);
     }
 
-    const url = (await response.json().catch(() => null))?.download_url;
+    const url = (await response.json().catch(() => null))?.payload?.downloadUrl;
 
     if (!url) {
         throw new Error('FACEIT не подписал ссылку');
@@ -263,6 +273,17 @@ function setText(text) {
     applyState();
 }
 
+// Ошибка не висит на кнопке вечно: через 8 секунд она снова готова к нажатию
+function setError(text) {
+    setText(text);
+
+    setTimeout(() => {
+        if (uiState.phase === 'text' && uiState.text === text) {
+            reset();
+        }
+    }, 8000);
+}
+
 function reset() {
     uiState = { phase: 'idle', text: DEFAULT_TEXT, url: null };
     applyState();
@@ -319,7 +340,7 @@ function scanAnchor() {
         removeFloating();
 
         anchorMount = mountPoint('anchor');
-        anchorMount.host.style.cssText = 'display:block;width:100%;margin-top:8px;';
+        anchorMount.host.style.cssText = 'display:block;width:100%;margin:8px 0;';
         anchor.parentElement.insertBefore(anchorMount.host, anchor.nextSibling);
         applyState();
     }
@@ -420,16 +441,16 @@ function onAnalyzeClick(event) {
                 }
 
                 if (state.error) {
-                    setText(state.error);
+                    setError(state.error);
                 }
             });
         })
-        .catch((e) => setText(String(e.message || e)));
+        .catch((e) => setError(String(e.message || e)));
 }
 
 // ---- Бейджи ELOUP у игроков комнаты ----------------------------------------
 
-let roomPlayers = new Map(); // ник (lower) → публичный профиль ELOUP
+let roomPlayers = new Map(); // ник FACEIT (lower) → запись ELOUP { nickname, profile|null }
 let playersLoadedFor = null;
 
 async function loadRoomPlayers(matchId) {
@@ -450,26 +471,47 @@ async function loadRoomPlayers(matchId) {
     playersLoadedFor = matchId;
 
     try {
-        // Ростер — из кэша матча: бейджи не добавляют FACEIT ни одного запроса
+        // Ростер — из кэша матча: бейджи не добавляют FACEIT ни одного запроса.
+        // Ник + SteamID64: сервер ищет зарегистрированных по обоим — SteamID
+        // матчит даже когда ник ELOUP не совпадает с ником FACEIT
         const payload = await matchPayload(matchId);
         const roster = [
             ...(payload?.teams?.factions?.faction1?.roster ?? []),
             ...(payload?.teams?.factions?.faction2?.roster ?? []),
         ];
-        const nicknames = [...new Set(roster.map((p) => p?.nickname).filter(Boolean))].slice(0, 10);
+        const seen = new Set();
+        const players = [];
 
-        if (!nicknames.length) {
+        for (const entry of roster) {
+            const nickname = entry?.nickname || entry?.game_player_name || null;
+            const steamId = entry?.game_player_id || entry?.steam_id_64 || entry?.steam_id64 || null;
+
+            if (!nickname || seen.has(nickname.toLowerCase())) {
+                continue;
+            }
+
+            seen.add(nickname.toLowerCase());
+            players.push({ nickname, steam_id: steamId });
+
+            if (players.length === 10) {
+                break;
+            }
+        }
+
+        if (!players.length) {
             return;
         }
 
-        chrome.runtime.sendMessage({ type: 'eloup-lookup', nicknames }, (state) => {
+        chrome.runtime.sendMessage({ type: 'eloup-lookup', players }, (state) => {
             // Бейджи — необязательная витрина: без токена или при сбое тихо уходим
             if (chrome.runtime.lastError || !state || !state.auth || state.error) {
                 return;
             }
 
-            roomPlayers = new Map((state.players || []).map((player) => [player.nickname.toLowerCase(), player]));
-            cacheSet(key, state.players || [], PLAYERS_TTL);
+            const found = (state.players || []).filter((player) => player.eloup);
+
+            roomPlayers = new Map(found.map((player) => [player.nickname.toLowerCase(), player]));
+            cacheSet(key, found, PLAYERS_TTL);
             bindBadges();
         });
     } catch {
@@ -477,11 +519,11 @@ async function loadRoomPlayers(matchId) {
     }
 }
 
-function badgeEl(player) {
+function badgeEl(entry) {
     const badge = document.createElement('span');
 
-    badge.dataset.eloupBadge = player.nickname;
-    badge.textContent = player.roles?.length ? `ELOUP · ${player.roles[0]}` : 'ELOUP';
+    badge.dataset.eloupBadge = entry.nickname;
+    badge.textContent = entry.profile?.roles?.length ? `ELOUP · ${entry.profile.roles[0]}` : 'ELOUP';
     badge.title = 'Игрок ELOUP.GG — нажмите для карточки';
     badge.style.cssText = [
         'display:inline-block',
@@ -499,7 +541,7 @@ function badgeEl(player) {
     badge.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        showPopover(player, badge);
+        showPopover(entry, badge);
     });
 
     return badge;
@@ -539,7 +581,7 @@ function bindBadges() {
 
 let popoverHost = null;
 
-function showPopover(player, anchorEl) {
+function showPopover(entry, anchorEl) {
     popoverHost?.remove();
 
     popoverHost = document.createElement('div');
@@ -587,14 +629,21 @@ function showPopover(player, anchorEl) {
     `;
 
     const card = root.querySelector('.card');
+    const profile = entry.profile;
 
-    root.querySelector('h3').textContent = player.nickname;
-    root.querySelector('.name').textContent = player.name !== player.nickname ? player.name : '';
-    root.querySelector('.roles').textContent = (player.roles || []).join(' · ');
-    root.querySelector('.map').textContent = player.favorite_map ? `Любимая карта: ${player.favorite_map}` : '';
-    root.querySelector('.hl').textContent = player.highlights_count ? `Хайлайтов: ${player.highlights_count}` : '';
+    root.querySelector('h3').textContent = entry.nickname;
 
-    root.querySelector('a.button').href = player.profile_url;
+    if (profile) {
+        root.querySelector('.name').textContent = profile.name && profile.name !== entry.nickname ? profile.name : '';
+        root.querySelector('.roles').textContent = (profile.roles || []).join(' · ');
+        root.querySelector('.map').textContent = profile.favorite_map ? `Любимая карта: ${profile.favorite_map}` : '';
+        root.querySelector('.hl').textContent = profile.highlights_count ? `Хайлайтов: ${profile.highlights_count}` : '';
+        root.querySelector('a.button').href = profile.profile_url;
+    } else {
+        // Зарегистрирован, но профиль скрыт: без согласия личность не раскрываем
+        root.querySelector('.name').textContent = 'Игрок зарегистрирован на ELOUP.GG, профиль скрыт';
+        root.querySelector('a.button').style.display = 'none';
+    }
 
     // Не выезжаем за экран: позиция от бейджа с отступом от краёв
     const rect = anchorEl.getBoundingClientRect();
@@ -800,7 +849,7 @@ chrome.runtime.onMessage.addListener((message) => {
         } else if (message.phase === 'done') {
             done(message.url);
         } else if (message.phase === 'error') {
-            setText(message.message);
+            setError(message.message);
         }
     }
 

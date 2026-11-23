@@ -68,12 +68,13 @@ async function getStates(matchIds) {
     return { auth: true, matches: json.matches || [] };
 }
 
-// Публичные профили ELOUP по никам десятки — для бейджей в комнате матча
-async function lookupPlayers(nicknames) {
+// Ростер десятки (ники + SteamID64) → кто зарегистрирован на ELOUP — для
+// бейджей в комнате матча
+async function lookupPlayers(players) {
     const { json, response } = await api('/api/extension/players/lookup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nicknames: (nicknames || []).slice(0, 10) }),
+        body: JSON.stringify({ players: (players || []).slice(0, 10) }),
     });
 
     if (response.status === 401) {
@@ -284,7 +285,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message?.type === 'eloup-lookup') {
-        lookupPlayers(message.nicknames).then(sendResponse);
+        lookupPlayers(message.players).then(sendResponse);
 
         return true;
     }
