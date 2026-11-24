@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "ELOUP.GG — разбор каток FACEIT",
-    "version": "0.3.2",
+    "version": "0.3.3",
     "description": "Разбор каток FACEIT на ELOUP: кнопка в комнате матча, бейджи игроков ELOUP и быстрый разбор из истории матчей.",
     "permissions": ["storage"],
     "host_permissions": [

@@ -10,7 +10,9 @@
 //
 // FACEIT — SPA на React: DOM появляется и пропадает без перезагрузок,
 // за якорями следит MutationObserver, за адресом — интервал и popstate.
-// Стили — в shadow DOM, чтобы не конфликтовать со страницей.
+// Бейдж и плитки истории — shadow DOM на собственных тегах (eloup-badge,
+// eloup-tile): FACEIT перекрашивает button/span страницы важными
+// объявлениями (так плитки становились белыми), а внутрь тени не достаёт.
 //
 // Диагностика бейджей и иконок — логами [ELOUP] в консоль страницы:
 // ростер → список на lookup → ответ сервера → сколько бейджей повешено.
@@ -549,41 +551,96 @@ async function loadRoomPlayers(matchId) {
     }
 }
 
-function badgeEl(entry) {
-    const badge = document.createElement('span');
+// ---- Фирменный знак ---------------------------------------------------------
 
-    badge.dataset.eloupBadge = entry.nickname;
-    badge.textContent = entry.profile?.roles?.length ? `ELOUP · ${entry.profile.roles[0]}` : 'ELOUP';
-    badge.title = 'Игрок ELOUP.GG — нажмите для карточки';
-    badge.style.cssText = [
-        'display:inline-block',
-        'margin-left:6px',
-        'padding:1px 6px',
-        'border-radius:4px',
-        'background:#ccff00',
-        'color:#0a0c10',
-        "font:800 10px/1.4 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif",
-        'letter-spacing:.04em',
-        'text-transform:uppercase',
-        'cursor:pointer',
-        'vertical-align:middle',
-    ].join(';');
-    badge.addEventListener('click', (event) => {
+// Знак ELOUP — ломаная роста с четырьмя узлами, как в логотипе. Цвет берёт
+// из currentColor, поэтому одна и та же разметка служит и тёмной плашке
+// с жёлтым знаком, и жёлтой с тёмным
+const MARK_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 9 11 13 14 20 6"/><g fill="currentColor" stroke="none"><circle cx="4" cy="17" r="2"/><circle cx="9" cy="11" r="2"/><circle cx="13" cy="14" r="2"/><circle cx="20" cy="6" r="2"/></g></svg>';
+
+// Палитра сайта: жёлтый на почти чёрном
+const BRAND_BG = '#ccff00';
+const BRAND_INK = '#0a0c10';
+const BRAND_DARK = '#16181d';
+const BRAND_FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+
+// Всё фирменное живёт в shadow DOM: FACEIT перекрашивает кнопки и плашки
+// страницы своим CSS с !important (так плитки «E» в истории становились
+// белыми), а внутрь тени его правила не достают. Обратное неверно: важные
+// объявления страницы сильнее :host, поэтому хост — собственный тег
+// (eloup-tile / eloup-badge): правила FACEIT по тегам button, a, span на
+// него не попадают, и страница не закрасит подложку под плиткой.
+// `all: initial` на хосте обрезает наследование — шрифт и цвет страницы
+// внутрь не просачиваются
+const HOST_RESET = 'all:initial;display:inline-flex;vertical-align:middle;';
+
+// css — стили конкретной плашки, дописываются после сброса хоста
+function brandRoot(host, css) {
+    const root = host.attachShadow({ mode: 'open' });
+
+    root.innerHTML = `<style>:host{${HOST_RESET}}${css}</style>`;
+
+    return root;
+}
+
+function badgeEl(entry) {
+    const host = document.createElement('eloup-badge');
+
+    host.dataset.eloupBadge = entry.nickname;
+
+    // Отступ — на кнопке внутри тени, а не на хосте: страницы с !important
+    // (margin: 0 у FACEIT) перешибают :host, а внутрь тени не достают
+    const root = brandRoot(host, `
+        button {
+            all: unset;
+            margin-left: 6px;
+            box-sizing: border-box;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 7px 2px 5px;
+            border-radius: 4px;
+            background: ${BRAND_BG};
+            color: ${BRAND_INK};
+            font: 800 10px/1.4 ${BRAND_FONT};
+            letter-spacing: .04em;
+            text-transform: uppercase;
+            white-space: nowrap;
+            cursor: pointer;
+            transition: filter .15s ease;
+        }
+        button:hover { filter: brightness(1.08); }
+        button:focus-visible { outline: 2px solid ${BRAND_INK}; outline-offset: 1px; }
+        .mark { display: inline-flex; }
+    `);
+
+    const button = document.createElement('button');
+
+    button.type = 'button';
+    button.title = 'Игрок ELOUP.GG — нажмите для карточки';
+    button.innerHTML = `<span class="mark">${MARK_SVG}</span><span class="label"></span>`;
+    button.querySelector('.label').textContent = entry.profile?.roles?.length ? `ELOUP · ${entry.profile.roles[0]}` : 'ELOUP';
+    button.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        showPopover(entry, badge);
+        showPopover(entry, host);
     });
 
-    return badge;
+    root.append(button);
+
+    return host;
 }
 
 // Ник в комнате — текстовый лист: React не даёт стабильных классов, ищем
-// точное совпадение текста у элементов без вложенных тегов
+// совпадение текста у элементов без вложенных тегов. Ключ карты игроков —
+// ник в нижнем регистре, поэтому текст страницы сравниваем так же без
+// регистра: иначе «---hiddeN» никогда не равен «---hidden» и бейджа нет
 function nicknameElements(nick) {
     const found = [];
+    const wanted = nick.toLowerCase();
 
     for (const el of document.querySelectorAll('span, div, a, p')) {
-        if (!el.childElementCount && (el.textContent || '').trim() === nick && !el.closest('[data-eloup-badge]')) {
+        if (!el.childElementCount && (el.textContent || '').trim().toLowerCase() === wanted && !el.closest('[data-eloup-badge]')) {
             found.push(el);
         }
     }
@@ -602,7 +659,7 @@ function bindBadges() {
         const spots = nicknameElements(nick);
 
         if (!spots.length) {
-            debug(`ник «${nick}» не нашёлся в вёрстке комнаты`);
+            debug(`ник «${player.nickname}» не нашёлся в вёрстке комнаты`);
         }
 
         for (const el of spots) {
@@ -645,36 +702,40 @@ function showPopover(entry, anchorEl) {
                 font: 400 13px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
                 box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
             }
-            h3 { margin: 0 0 4px; font-size: 15px; }
+            h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; font-size: 15px; }
+            .mark { display: inline-flex; flex: 0 0 auto; color: #ccff00; }
             .muted { color: #9d9fa5; font-size: 12px; }
             .row { margin: 6px 0; font-size: 12px; }
             .roles { color: #ccff00; font-weight: 700; }
             a.button {
-                display: block;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
                 margin-top: 12px;
                 padding: 9px 12px;
                 border-radius: 4px;
                 background: #ccff00;
                 color: #0a0c10;
                 font-weight: 700;
-                text-align: center;
                 text-decoration: none;
             }
+            a.button .mark { color: #0a0c10; }
         </style>
         <div class="card">
-            <h3></h3>
+            <h3><span class="mark">${MARK_SVG}</span><span class="nick"></span></h3>
             <div class="name muted"></div>
             <div class="row roles"></div>
             <div class="row map muted"></div>
             <div class="row hl muted"></div>
-            <a class="button" target="_blank" rel="noopener">Профиль на ELOUP.GG</a>
+            <a class="button" target="_blank" rel="noopener"><span class="mark">${MARK_SVG}</span>Профиль на ELOUP.GG</a>
         </div>
     `;
 
     const card = root.querySelector('.card');
     const profile = entry.profile;
 
-    root.querySelector('h3').textContent = entry.nickname;
+    root.querySelector('.nick').textContent = entry.nickname;
 
     if (profile) {
         root.querySelector('.name').textContent = profile.name && profile.name !== entry.nickname ? profile.name : '';
@@ -713,93 +774,135 @@ function showPopover(entry, anchorEl) {
 const historyKnown = new Map(); // matchId → { status, url }
 const historyAsked = new Set(); // matchId → статусы уже спрашивали
 
-const ICON_BASE = [
-    'flex:0 0 auto',
-    'width:24px',
-    'height:24px',
-    'margin-left:8px',
-    'border:none',
-    'border-radius:6px',
-    'font:800 12px/1 system-ui,sans-serif',
-    'cursor:pointer',
-    'display:inline-flex',
-    'align-items:center',
-    'justify-content:center',
-    'text-decoration:none',
-    'box-sizing:border-box',
-].join(';');
+const TITLE_IDLE = 'Разобрать демку на ELOUP';
+const TITLE_DONE = 'Открыть разбор на ELOUP';
 
-function historyIcon(matchId) {
+// Плитка строки истории. Готовность — тёмная плитка с жёлтым знаком; готовый
+// разбор — плитка, залитая жёлтым (ссылка); в работе — знак мигает; сбой —
+// красный «!», причина в тултипе. Состояния переключает объект tile: его же
+// использует прогресс из фона, когда строку перерисовал React
+function historyTile(matchId) {
+    const host = document.createElement('eloup-tile');
+
+    host.dataset.eloupRow = matchId;
+
+    const root = brandRoot(host, `
+        button, a {
+            all: unset;
+            margin-left: 8px; // внутри тени: margin: 0 !important страницы сюда не достаёт
+            box-sizing: border-box;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            border: 1px solid rgba(204, 255, 0, .35);
+            border-radius: 6px;
+            background: ${BRAND_DARK};
+            color: ${BRAND_BG};
+            cursor: pointer;
+            transition: background .15s ease, color .15s ease, border-color .15s ease;
+        }
+        button:hover:not(:disabled) { border-color: ${BRAND_BG}; }
+        button:disabled { cursor: default; }
+        button:focus-visible, a:focus-visible { outline: 2px solid ${BRAND_BG}; outline-offset: 2px; }
+        a { display: none; background: ${BRAND_BG}; color: ${BRAND_INK}; border-color: ${BRAND_BG}; }
+        .mark { display: inline-flex; }
+        button.busy .mark { animation: pulse 1s ease-in-out infinite; }
+        button.error { color: #ff8f8f; border-color: rgba(255, 143, 143, .5); }
+        .bang { font: 900 13px/1 ${BRAND_FONT}; }
+        @keyframes pulse { 50% { opacity: .3; } }
+    `);
+
     const button = document.createElement('button');
+    const link = document.createElement('a');
 
-    button.dataset.eloupRow = matchId;
     button.type = 'button';
-    button.title = 'Разобрать демку на ELOUP';
-    button.textContent = 'E';
-    button.style.cssText = `${ICON_BASE}background:#ccff00;color:#0a0c10;`;
-    button.addEventListener('click', () => historyStart(button, matchId));
+    button.innerHTML = `<span class="mark">${MARK_SVG}</span>`;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.innerHTML = `<span class="mark">${MARK_SVG}</span>`;
 
-    return button;
+    const tile = {
+        working: false,
+        idle() {
+            link.style.display = 'none';
+            button.style.display = 'inline-flex';
+            button.disabled = false;
+            button.className = '';
+            button.querySelector('.mark').innerHTML = MARK_SVG;
+            button.title = TITLE_IDLE;
+        },
+        busy(title) {
+            link.style.display = 'none';
+            button.style.display = 'inline-flex';
+            button.disabled = true;
+            button.className = 'busy';
+            button.querySelector('.mark').innerHTML = MARK_SVG;
+            button.title = title;
+        },
+        error(message) {
+            link.style.display = 'none';
+            button.style.display = 'inline-flex';
+            button.disabled = false;
+            button.className = 'error';
+            button.querySelector('.mark').innerHTML = '<span class="bang">!</span>';
+            button.title = message;
+        },
+        done(url) {
+            button.style.display = 'none';
+            link.href = url;
+            link.title = TITLE_DONE;
+            link.querySelector('.mark').innerHTML = MARK_SVG;
+            link.style.display = 'inline-flex';
+        },
+    };
+
+    button.addEventListener('click', () => historyStart(tile, matchId));
+
+    tile.idle();
+    root.append(button, link);
+
+    // paintHistory находит плитку по data-eloup-row — так она получает доступ к состояниям
+    host.eloupTile = tile;
+
+    return host;
 }
 
-async function historyStart(button, matchId) {
-    if (button.disabled) {
+async function historyStart(tile, matchId) {
+    if (tile.working) {
         return;
     }
 
-    button.disabled = true;
-    button.textContent = '…';
-    button.title = 'Получаем ссылку на демку';
-    busyLook(button);
+    tile.working = true;
+    tile.busy('Получаем ссылку на демку');
 
     try {
         const [downloadUrl, focusNickname] = await Promise.all([signedDemoUrl(matchId), myMatchNickname(matchId)]);
 
-        button.textContent = '↑';
-        button.title = 'Передаём на ELOUP';
+        tile.busy('Передаём на ELOUP');
 
         chrome.runtime.sendMessage({ type: 'eloup-analyze', matchId, downloadUrl, focusNickname }, (state) => {
             if (chrome.runtime.lastError || !state) {
-                historyIdle(button);
+                tile.working = false;
+                tile.idle();
 
                 return;
             }
 
             if (state.error) {
-                errorLook(button, state.error);
+                tile.working = false;
+                tile.error(state.error);
             }
         });
     } catch (e) {
-        errorLook(button, String(e.message || e));
+        tile.working = false;
+        tile.error(String(e.message || e));
     }
 }
 
-// Промежуточные состояния иконки — тёмная плашка с жёлтым знаком: жёлтым
-// остаётся готовность к запуску (E) и готовый разбор (E✓)
-function busyLook(button) {
-    button.style.background = '#3a3f47';
-    button.style.color = '#ccff00';
-}
-
-// Сбой: тёмная плашка с красным знаком, причина — в тултипе
-function errorLook(button, message) {
-    button.textContent = '!';
-    button.title = message;
-    button.disabled = false;
-    button.style.background = '#3a3f47';
-    button.style.color = '#ff8f8f';
-}
-
-function historyIdle(button) {
-    button.disabled = false;
-    button.textContent = 'E';
-    button.title = 'Разобрать демку на ELOUP';
-    button.style.background = '#ccff00';
-    button.style.color = '#0a0c10';
-}
-
-// Известный статус красит строку: готово — жёлтая ссылка на разбор,
-// в работе — серый индикатор
+// Известный статус красит строку: готово — жёлтая плитка-ссылка на разбор,
+// в работе — мигающий знак
 function paintHistory(matchId) {
     const known = historyKnown.get(matchId);
 
@@ -807,32 +910,18 @@ function paintHistory(matchId) {
         return;
     }
 
-    const button = document.querySelector(`[data-eloup-row="${matchId}"]`);
+    const tile = document.querySelector(`[data-eloup-row="${matchId}"]`)?.eloupTile;
 
-    if (!button) {
+    if (!tile) {
         return;
     }
 
     if (known.status === 'done') {
-        const link = document.createElement('a');
-
-        link.dataset.eloupRow = matchId;
-        link.href = known.url;
-        link.target = '_blank';
-        link.rel = 'noopener';
-        link.title = 'Открыть разбор на ELOUP';
-        link.textContent = 'E✓';
-        link.style.cssText = `${ICON_BASE}background:#ccff00;color:#0a0c10;`;
-        button.replaceWith(link);
-
-        return;
-    }
-
-    if (known.status === 'queued' || known.status === 'parsing') {
-        button.disabled = true;
-        button.textContent = '…';
-        button.title = 'Разбирается на ELOUP';
-        busyLook(button);
+        tile.working = false;
+        tile.done(known.url);
+    } else if (known.status === 'queued' || known.status === 'parsing') {
+        tile.working = true;
+        tile.busy('Разбирается на ELOUP');
     }
 }
 
@@ -876,7 +965,7 @@ function historyScan() {
 
     for (const [matchId, row] of rows) {
         if (!row.querySelector(`[data-eloup-row="${matchId}"]`)) {
-            historyCell(row).append(historyIcon(matchId));
+            historyCell(row).append(historyTile(matchId));
         }
     }
 
@@ -923,7 +1012,23 @@ chrome.runtime.onMessage.addListener((message) => {
         }
     }
 
-    // История: строку с этим матчем перекрашиваем по завершении
+    // История: плитка строки показывает процент, а по завершении
+    // строка перекрашивается ссылкой на разбор
+    const tile = message.matchId
+        ? document.querySelector(`[data-eloup-row="${message.matchId}"]`)?.eloupTile
+        : null;
+
+    if (tile) {
+        if (message.phase === 'download' || message.phase === 'upload') {
+            const prefix = message.phase === 'download' ? 'Скачиваем демку: ' : 'Передаём на ELOUP: ';
+
+            tile.busy(`${prefix}${message.percent}%`);
+        } else if (message.phase === 'error') {
+            tile.working = false;
+            tile.error(message.message);
+        }
+    }
+
     if (message.phase === 'done' && message.matchId && message.url) {
         historyKnown.set(message.matchId, { status: 'done', url: message.url });
         paintHistory(message.matchId);

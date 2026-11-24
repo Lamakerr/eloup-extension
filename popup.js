@@ -18,6 +18,8 @@ async function load() {
     tokenInput.value = token;
     serverInput.value = server || DEFAULT_SERVER;
     aiToggle.checked = !!aiAuto;
+    // Положение тумблера уже выставлено — с этого момента его можно анимировать
+    aiSection.classList.add('ready');
 
     await refreshAi();
 }
