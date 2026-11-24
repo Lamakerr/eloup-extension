@@ -152,6 +152,10 @@ async function transfer(matchId, tabId, link, focusNickname) {
     const chunkSize = Math.min(state.upload?.chunk_size || 16 * 1024 * 1024, 32 * 1024 * 1024);
     const maxBytes = state.upload?.max_bytes || 1024 * 1024 * 1024;
 
+    // Тумблер попапа «каждый разбор сразу на ИИ» (#288): флаг едет с каждым
+    // куском, сервер учитывает его только для PLUS/staff
+    const { aiAuto = false } = await chrome.storage.local.get('aiAuto');
+
     const uploadId = crypto.randomUUID();
     const reader = response.body.getReader();
 
@@ -207,6 +211,11 @@ async function transfer(matchId, tabId, link, focusNickname) {
         // Ник FACEIT из комнаты — фокус разбора (см. myMatchNickname в content.js)
         if (focusNickname) {
             form.append('focus_nickname', focusNickname);
+        }
+        // Тумблер «каждый разбор сразу на ИИ»: не булево, а наличие флага —
+        // серверная проверка плана всё равно главная
+        if (aiAuto) {
+            form.append('ai_review', '1');
         }
         form.append('chunk', new Blob([buffer.subarray(0, filled)]));
 

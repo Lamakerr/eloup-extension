@@ -43,6 +43,10 @@
         #status.ok { color: #ccff00; }
         #status.err { color: #ff8f8f; }
         a { color: #ccff00; }
+        #ai { margin: 0 0 12px; padding: 10px 12px; border: 1px solid #2c313c; border-radius: 10px; background: #171a21; }
+        .ai-toggle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12px; cursor: pointer; }
+        .ai-toggle input { width: auto; margin: 0; accent-color: #ccff00; }
+        #aiHint { margin: 8px 0 0; font-size: 11px; color: #9aa1ad; line-height: 1.5; }
     </style>
 </head>
 <body>
@@ -54,6 +58,14 @@
 
     <label for="server">Адрес сайта</label>
     <input id="server" type="text" spellcheck="false" value="https://eloup.gg">
+
+    <div id="ai" hidden>
+        <label class="ai-toggle" for="aiToggle">
+            <input type="checkbox" id="aiToggle">
+            <span>Каждый разбор сразу на ИИ</span>
+        </label>
+        <p id="aiHint" hidden>Сначала один раз подтвердите согласие на передачу данных ИИ — закажите любой разбор на <a id="aiConsentLink" target="_blank" rel="noopener">сайте ELOUP</a>.</p>
+    </div>
 
     <button id="save">Сохранить и проверить</button>
     <div id="status"></div>

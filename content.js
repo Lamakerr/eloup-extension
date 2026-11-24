@@ -11,6 +11,9 @@
 // FACEIT — SPA на React: DOM появляется и пропадает без перезагрузок,
 // за якорями следит MutationObserver, за адресом — интервал и popstate.
 // Стили — в shadow DOM, чтобы не конфликтовать со страницей.
+//
+// Диагностика бейджей и иконок — логами [ELOUP] в консоль страницы:
+// ростер → список на lookup → ответ сервера → сколько бейджей повешено.
 
 const MATCH_URL = /\/cs2\/room\/(1-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const HISTORY_URL = /\/players\/[^/]+\/(stats\/|cs2\/history)/;
@@ -103,6 +106,27 @@ async function resourceUrl(matchId) {
     }
 
     return link;
+}
+
+// Ростер матча (разведка 24.11): в ответе match/v2 фракции лежат сразу в
+// payload.teams — без промежуточного «factions» из Data API v4, а SteamID64
+// игрока — поле gameId. Варианты v4 оставлены фолбэками: вдруг FACEIT
+// вернёт старую схему на другом эндпойнте
+function rosterOf(payload) {
+    const factions = payload?.teams?.factions ?? payload?.teams;
+
+    return [
+        ...(factions?.faction1?.roster ?? []),
+        ...(factions?.faction2?.roster ?? []),
+    ];
+}
+
+function playerSteamId(entry) {
+    return entry?.gameId || entry?.game_player_id || entry?.steam_id_64 || entry?.steam_id64 || null;
+}
+
+function debug(message) {
+    console.log(`[ELOUP] ${message}`);
 }
 
 // POST подписи — единственный эндпойнт, на котором FACEIT ставит капчу:
@@ -217,13 +241,13 @@ function mountPoint(kind) {
                 transition: filter .15s ease;
                 user-select: none;
             }
-            button { background: #ccff00; color: #0a0c10; }
-            a { background: #17b26a; color: #fff; display: none; }
+            button, a { background: #ccff00; color: #0a0c10; }
+            a { display: none; }
             button:hover:not(:disabled), a:hover { filter: brightness(1.08); }
             button:disabled { opacity: .55; cursor: default; }
         </style>
         <button type="button"><span></span></button>
-        <a target="_blank" rel="noopener">Открыть разбор</a>
+        <a target="_blank" rel="noopener">Открыть разбор на ELOUP.GG</a>
     `;
 
     const mount = { host, root, button: root.querySelector('button'), link: root.querySelector('a'), kind };
@@ -396,14 +420,10 @@ async function myMatchNickname(matchId) {
 
     try {
         const payload = await matchPayload(matchId);
-        const roster = [
-            ...(payload?.teams?.factions?.faction1?.roster ?? []),
-            ...(payload?.teams?.factions?.faction2?.roster ?? []),
-        ];
 
-        for (const player of roster) {
-            if ([player?.game_player_id, player?.steam_id_64, player?.steam_id64].includes(meSteamId)) {
-                return player?.nickname || player?.game_player_name || null;
+        for (const player of rosterOf(payload)) {
+            if (playerSteamId(player) === meSteamId) {
+                return player?.nickname || player?.game_player_name || player?.gameName || null;
             }
         }
     } catch {
@@ -464,6 +484,8 @@ async function loadRoomPlayers(matchId) {
     if (cached) {
         playersLoadedFor = matchId;
         roomPlayers = new Map(cached.map((player) => [player.nickname.toLowerCase(), player]));
+        debug(`бейджи: из кэша ${roomPlayers.size} игрок(ов) ELOUP`);
+        bindBadges();
 
         return;
     }
@@ -475,16 +497,13 @@ async function loadRoomPlayers(matchId) {
         // Ник + SteamID64: сервер ищет зарегистрированных по обоим — SteamID
         // матчит даже когда ник ELOUP не совпадает с ником FACEIT
         const payload = await matchPayload(matchId);
-        const roster = [
-            ...(payload?.teams?.factions?.faction1?.roster ?? []),
-            ...(payload?.teams?.factions?.faction2?.roster ?? []),
-        ];
+        const roster = rosterOf(payload);
         const seen = new Set();
         const players = [];
 
         for (const entry of roster) {
             const nickname = entry?.nickname || entry?.game_player_name || null;
-            const steamId = entry?.game_player_id || entry?.steam_id_64 || entry?.steam_id64 || null;
+            const steamId = playerSteamId(entry);
 
             if (!nickname || seen.has(nickname.toLowerCase())) {
                 continue;
@@ -498,24 +517,35 @@ async function loadRoomPlayers(matchId) {
             }
         }
 
+        debug(`ростер: ${roster.length}, на lookup уходит ${players.length} (${players.map((p) => p.nickname).join(', ') || '—'})`);
+
         if (!players.length) {
+            debug('ростер пуст — бейджей не будет: FACEIT снова сменил структуру ответа');
+
             return;
         }
 
         chrome.runtime.sendMessage({ type: 'eloup-lookup', players }, (state) => {
             // Бейджи — необязательная витрина: без токена или при сбое тихо уходим
+            const failure = chrome.runtime.lastError?.message || state?.error;
+
             if (chrome.runtime.lastError || !state || !state.auth || state.error) {
+                debug(`lookup не прошёл: ${failure || 'нет ответа'}`);
+
                 return;
             }
 
             const found = (state.players || []).filter((player) => player.eloup);
 
+            debug(`ELOUP знает ${found.length} из ${players.length}: ${found.map((p) => p.nickname).join(', ') || '—'}`);
+
             roomPlayers = new Map(found.map((player) => [player.nickname.toLowerCase(), player]));
             cacheSet(key, found, PLAYERS_TTL);
             bindBadges();
         });
-    } catch {
+    } catch (e) {
         // Матч скрыт — бейджей не будет, кнопка от них не зависит
+        debug(`ростер не прочитан: ${e.message || e}`);
     }
 }
 
@@ -566,14 +596,27 @@ function bindBadges() {
         return;
     }
 
+    let bound = 0;
+
     for (const [nick, player] of roomPlayers) {
-        for (const el of nicknameElements(nick)) {
+        const spots = nicknameElements(nick);
+
+        if (!spots.length) {
+            debug(`ник «${nick}» не нашёлся в вёрстке комнаты`);
+        }
+
+        for (const el of spots) {
             if (el.nextElementSibling?.dataset?.eloupBadge === player.nickname) {
                 continue;
             }
 
             el.after(badgeEl(player));
+            bound++;
         }
+    }
+
+    if (bound) {
+        debug(`бейджи: повешено ${bound}`);
     }
 }
 
@@ -707,6 +750,7 @@ async function historyStart(button, matchId) {
     button.disabled = true;
     button.textContent = '…';
     button.title = 'Получаем ссылку на демку';
+    busyLook(button);
 
     try {
         const [downloadUrl, focusNickname] = await Promise.all([signedDemoUrl(matchId), myMatchNickname(matchId)]);
@@ -722,25 +766,39 @@ async function historyStart(button, matchId) {
             }
 
             if (state.error) {
-                button.textContent = '!';
-                button.title = state.error;
-                button.disabled = false;
+                errorLook(button, state.error);
             }
         });
     } catch (e) {
-        button.textContent = '!';
-        button.title = String(e.message || e);
-        button.disabled = false;
+        errorLook(button, String(e.message || e));
     }
+}
+
+// Промежуточные состояния иконки — тёмная плашка с жёлтым знаком: жёлтым
+// остаётся готовность к запуску (E) и готовый разбор (E✓)
+function busyLook(button) {
+    button.style.background = '#3a3f47';
+    button.style.color = '#ccff00';
+}
+
+// Сбой: тёмная плашка с красным знаком, причина — в тултипе
+function errorLook(button, message) {
+    button.textContent = '!';
+    button.title = message;
+    button.disabled = false;
+    button.style.background = '#3a3f47';
+    button.style.color = '#ff8f8f';
 }
 
 function historyIdle(button) {
     button.disabled = false;
     button.textContent = 'E';
     button.title = 'Разобрать демку на ELOUP';
+    button.style.background = '#ccff00';
+    button.style.color = '#0a0c10';
 }
 
-// Известный статус красит строку: готово — зелёная ссылка на разбор,
+// Известный статус красит строку: готово — жёлтая ссылка на разбор,
 // в работе — серый индикатор
 function paintHistory(matchId) {
     const known = historyKnown.get(matchId);
@@ -764,7 +822,7 @@ function paintHistory(matchId) {
         link.rel = 'noopener';
         link.title = 'Открыть разбор на ELOUP';
         link.textContent = 'E✓';
-        link.style.cssText = `${ICON_BASE}background:#17b26a;color:#fff;`;
+        link.style.cssText = `${ICON_BASE}background:#ccff00;color:#0a0c10;`;
         button.replaceWith(link);
 
         return;
@@ -774,9 +832,17 @@ function paintHistory(matchId) {
         button.disabled = true;
         button.textContent = '…';
         button.title = 'Разбирается на ELOUP';
-        button.style.background = '#3a3f47';
-        button.style.color = '#9d9fa5';
+        busyLook(button);
     }
+}
+
+// Ячейка строки, куда встаёт иконка: в истории FACEIT строка — сетка div,
+// а не таблица, и ссылка на матч работает с display: contents. Вставляем в
+// последнюю MatchTableCell, чтобы иконка осталась в потоке своей строки, а
+// не падала в конец списка. Хеши классов styled-components нестабильны —
+// матчим по стабильной части имени
+function historyCell(row) {
+    return row.querySelector(':scope > [class*="MatchTableCell"]:last-of-type') || row;
 }
 
 function historyScan() {
@@ -793,7 +859,11 @@ function historyScan() {
             continue;
         }
 
-        const row = link.closest('tr, li, [role="row"]') || link.parentElement;
+        // Строка истории — сама ссылка на комнату (display: contents), её
+        // ячейки — грид-элементы. Раньше closest('tr,li,[role="row"]') на
+        // такой вёрстке возвращал null и fallback брал родителя ссылки — то
+        // есть контейнер всего списка, и иконки сбивались под список
+        const row = link.closest('tr, li, [role="row"]') || link.closest('a[href*="/room/"]') || link.parentElement;
 
         if (row && !rows.has(match[1])) {
             rows.set(match[1], row);
@@ -806,7 +876,7 @@ function historyScan() {
 
     for (const [matchId, row] of rows) {
         if (!row.querySelector(`[data-eloup-row="${matchId}"]`)) {
-            row.append(historyIcon(matchId));
+            historyCell(row).append(historyIcon(matchId));
         }
     }
 
