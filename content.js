@@ -3,7 +3,8 @@
 // Что делает:
 //   • комната матча — кнопка «Разобрать на ELOUP» под «СМОТРЕТЬ ДЕМО»
 //     (плавающая, если FACEIT переставил вёрстку) и бейдж «ELOUP · роль»
-//     у игроков, зарегистрированных на платформе;
+//     у игроков, зарегистрированных на платформе (тесно рядом с ником —
+//     бейдж сворачивается до одного знака, ник важнее);
 //   • история матчей — кнопка быстрого разбора в каждой строке;
 //   • подписанные ссылки на демки: кэш, дедупликация и анти-флуд — FACEIT
 //     стал присаживать запросы на капчу (403 на download-url, 23.11).
@@ -13,6 +14,9 @@
 // Бейдж и плитки истории — shadow DOM на собственных тегах (eloup-badge,
 // eloup-tile): FACEIT перекрашивает button/span страницы важными
 // объявлениями (так плитки становились белыми), а внутрь тени не достаёт.
+// Расширение обновили или отключили — прежняя копия скрипта в открытых
+// вкладках замолкает: не дёргает API и не сыплет «Extension context
+// invalidated» в журнал расширения.
 //
 // Диагностика бейджей и иконок — логами [ELOUP] в консоль страницы:
 // ростер → список на lookup → ответ сервера → сколько бейджей повешено.
@@ -389,9 +393,69 @@ function scheduleFloating() {
     }, ANCHOR_GRACE);
 }
 
+// ---- Контекст расширения ----------------------------------------------------
+
+// После «Обновить» или отключения расширения в chrome://extensions в открытых
+// вкладках FACEIT остаётся прежняя копия этого скрипта. Доступ к API у неё уже
+// отобран, и любой вызов chrome.runtime кидает «Extension context invalidated»
+// (так журнал расширения каждую секунду пополнялся ошибкой из вкладки истории).
+// Как только контекст потерян — разбираем таймеры и наблюдателей и молчим;
+// кнопки и бейджи вернутся после перезагрузки страницы
+const CONTEXT_ID = globalThis.chrome?.runtime?.id;
+
+let contextAlive = true;
+
+function contextLost() {
+    return !contextAlive || globalThis.chrome?.runtime?.id !== CONTEXT_ID;
+}
+
+function loseContext() {
+    if (!contextAlive) {
+        return;
+    }
+
+    contextAlive = false;
+
+    clearInterval(ticker);
+    pageObserver.disconnect();
+    window.removeEventListener('popstate', tick);
+    window.removeEventListener('resize', refitBadges);
+    debug('расширение обновлено или отключено — обновите страницу (F5), чтобы вернуть кнопку и бейджи');
+}
+
+// sendMessage с защитой от потерянного контекста: onState получает ответ и
+// текст lastError (null, если всё хорошо)
+function send(message, onState) {
+    if (contextLost()) {
+        loseContext();
+
+        return;
+    }
+
+    try {
+        chrome.runtime.sendMessage(message, (state) => {
+            const error = chrome.runtime.lastError?.message || '';
+
+            if (/context invalidated/i.test(error)) {
+                loseContext();
+
+                return;
+            }
+
+            onState(state, error || null);
+        });
+    } catch (e) {
+        if (!/context invalidated/i.test(String(e?.message || e))) {
+            throw e;
+        }
+
+        loseContext();
+    }
+}
+
 function check(matchId) {
-    chrome.runtime.sendMessage({ type: 'eloup-check', matchId }, (state) => {
-        if (chrome.runtime.lastError || !state) {
+    send({ type: 'eloup-check', matchId }, (state, error) => {
+        if (error || !state) {
             return;
         }
 
@@ -455,8 +519,8 @@ function onAnalyzeClick(event) {
         .then(([downloadUrl, focusNickname]) => {
             setBusy('Передаём на ELOUP…');
 
-            chrome.runtime.sendMessage({ type: 'eloup-analyze', matchId: currentMatch, downloadUrl, focusNickname }, (state) => {
-                if (chrome.runtime.lastError || !state) {
+            send({ type: 'eloup-analyze', matchId: currentMatch, downloadUrl, focusNickname }, (state, error) => {
+                if (error || !state) {
                     reset();
 
                     return;
@@ -527,11 +591,11 @@ async function loadRoomPlayers(matchId) {
             return;
         }
 
-        chrome.runtime.sendMessage({ type: 'eloup-lookup', players }, (state) => {
+        send({ type: 'eloup-lookup', players }, (state, error) => {
             // Бейджи — необязательная витрина: без токена или при сбое тихо уходим
-            const failure = chrome.runtime.lastError?.message || state?.error;
+            const failure = error || state?.error;
 
-            if (chrome.runtime.lastError || !state || !state.auth || state.error) {
+            if (error || !state || !state.auth || state.error) {
                 debug(`lookup не прошёл: ${failure || 'нет ответа'}`);
 
                 return;
@@ -612,6 +676,11 @@ function badgeEl(entry) {
         button:hover { filter: brightness(1.08); }
         button:focus-visible { outline: 2px solid ${BRAND_INK}; outline-offset: 1px; }
         .mark { display: inline-flex; }
+        /* Тесно рядом с ником — бейдж сворачивается до одного знака (16×16,
+           как иконки FACEIT рядом), роль уходит в подсказку */
+        :host([data-compact]) button { margin-left: 4px; padding: 2px; gap: 0; border-radius: 4px; }
+        :host([data-compact]) .label { display: none; }
+        :host([data-compact]) .mark svg { width: 12px; height: 12px; }
     `);
 
     const button = document.createElement('button');
@@ -619,7 +688,17 @@ function badgeEl(entry) {
     button.type = 'button';
     button.title = 'Игрок ELOUP.GG — нажмите для карточки';
     button.innerHTML = `<span class="mark">${MARK_SVG}</span><span class="label"></span>`;
-    button.querySelector('.label').textContent = entry.profile?.roles?.length ? `ELOUP · ${entry.profile.roles[0]}` : 'ELOUP';
+
+    const role = entry.profile?.roles?.length ? entry.profile.roles[0] : '';
+    const plainTitle = 'Игрок ELOUP.GG — нажмите для карточки';
+
+    button.querySelector('.label').textContent = role ? `ELOUP · ${role}` : 'ELOUP';
+
+    // Подсказка в свёрнутом виде называет то, что не поместилось на плашке
+    host.eloupFit = (compact) => {
+        host.toggleAttribute('data-compact', compact);
+        button.title = compact && role ? `ELOUP.GG · ${role} — нажмите для карточки` : plainTitle;
+    };
     button.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -648,6 +727,49 @@ function nicknameElements(nick) {
     return found;
 }
 
+// Ник важнее бейджа. FACEIT отводит контейнеру ника немного места (в комнате
+// игрок ELOUP оставался с двумя дефисами вместо ника): если с плашкой имя
+// усекается — бейдж сворачивается до одного знака. Замеряем само имя, поэтому
+// правило работает в любой вёрстке, не только в ростере.
+//
+// Замер — только в развёрнутом виде: со знаком имени почти всегда хватает, и
+// замер в свёрнутом виде разворачивал бы плашку обратно (и имя усекалось вновь)
+function fitBadges() {
+    const hosts = document.querySelectorAll('eloup-badge[data-eloup-badge]');
+
+    for (const host of hosts) {
+        host.removeAttribute('data-compact');
+    }
+
+    for (const host of hosts) {
+        // Имя запомнили при вставке; сосед слева — запасной вариант
+        const nameEl = host.eloupName?.isConnected ? host.eloupName : host.previousElementSibling;
+
+        if (!nameEl?.isConnected) {
+            continue;
+        }
+
+        host.eloupFit?.(nameEl.scrollWidth > nameEl.clientWidth + 1);
+    }
+}
+
+// Пересборка — кадром позже, когда страница доедет свои изменения: окно
+// изменили или React дорисовал строку игрока (иконку рядом с ником)
+let refitQueued = false;
+
+function refitBadges() {
+    if (refitQueued) {
+        return;
+    }
+
+    refitQueued = true;
+
+    requestAnimationFrame(() => {
+        refitQueued = false;
+        fitBadges();
+    });
+}
+
 function bindBadges() {
     if (!roomPlayers.size || !currentMatch) {
         return;
@@ -667,14 +789,21 @@ function bindBadges() {
                 continue;
             }
 
-            el.after(badgeEl(player));
+            const badge = badgeEl(player);
+
+            badge.eloupName = el;
+            el.after(badge);
             bound++;
         }
     }
 
     if (bound) {
+        // Сразу, до первой отрисовки: полная плашка не должна мигнуть
+        fitBadges();
         debug(`бейджи: повешено ${bound}`);
     }
+
+    refitBadges();
 }
 
 // ---- Карточка игрока -------------------------------------------------------
@@ -882,8 +1011,8 @@ async function historyStart(tile, matchId) {
 
         tile.busy('Передаём на ELOUP');
 
-        chrome.runtime.sendMessage({ type: 'eloup-analyze', matchId, downloadUrl, focusNickname }, (state) => {
-            if (chrome.runtime.lastError || !state) {
+        send({ type: 'eloup-analyze', matchId, downloadUrl, focusNickname }, (state, error) => {
+            if (error || !state) {
                 tile.working = false;
                 tile.idle();
 
@@ -977,8 +1106,8 @@ function historyScan() {
 
         batch.forEach((matchId) => historyAsked.add(matchId));
 
-        chrome.runtime.sendMessage({ type: 'eloup-check-many', matchIds: batch }, (state) => {
-            if (chrome.runtime.lastError || !state || !state.auth || state.error) {
+        send({ type: 'eloup-check-many', matchIds: batch }, (state, error) => {
+            if (error || !state || !state.auth || state.error) {
                 batch.forEach((matchId) => historyAsked.delete(matchId)); // можно переспросить
 
                 return;
@@ -1062,6 +1191,12 @@ function enterRoom(matchId) {
 }
 
 function tick() {
+    if (contextLost()) {
+        loseContext();
+
+        return;
+    }
+
     const match = location.pathname.match(MATCH_URL);
 
     if (match && match[1] !== currentMatch) {
@@ -1083,7 +1218,7 @@ function tick() {
 // истории перевешиваем по мутациям, но не чаще раза в секунду
 let scanQueued = false;
 
-new MutationObserver(() => {
+const pageObserver = new MutationObserver(() => {
     if (scanQueued) {
         return;
     }
@@ -1092,14 +1227,25 @@ new MutationObserver(() => {
 
     setTimeout(() => {
         scanQueued = false;
+
+        if (contextLost()) {
+            loseContext();
+
+            return;
+        }
+
         scanAnchor();
         bindBadges();
         historyScan();
     }, 1000);
-}).observe(document.body, { childList: true, subtree: true });
+});
 
-setInterval(tick, 1000);
+pageObserver.observe(document.body, { childList: true, subtree: true });
+
+const ticker = setInterval(tick, 1000);
+
 window.addEventListener('popstate', tick);
+window.addEventListener('resize', refitBadges);
 tick();
 
 
