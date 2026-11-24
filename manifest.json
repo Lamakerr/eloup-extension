@@ -1,13 +1,12 @@
 {
     "manifest_version": 3,
     "name": "ELOUP.GG — разбор каток FACEIT",
-    "version": "0.3.4",
+    "version": "0.3.5",
     "description": "Разбор каток FACEIT на ELOUP: кнопка в комнате матча, бейджи игроков ELOUP и быстрый разбор из истории матчей.",
     "permissions": ["storage"],
     "host_permissions": [
         "https://www.faceit.com/*",
         "https://api.faceit.com/*",
-        "https://*.faceit-cdn.net/*",
         "https://*.backblazeb2.com/*",
         "https://eloup.gg/*",
         "http://localhost/*",

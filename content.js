@@ -18,8 +18,9 @@
 // вкладках замолкает: не дёргает API и не сыплет «Extension context
 // invalidated» в журнал расширения.
 //
-// Диагностика бейджей и иконок — логами [ELOUP] в консоль страницы:
-// ростер → список на lookup → ответ сервера → сколько бейджей повешено.
+// Диагностика бейджей и иконок — логами [ELOUP] в консоль страницы (только с
+// флагом debug в chrome.storage.local, по умолчанию выключены): ростер →
+// список на lookup → ответ сервера → сколько бейджей повешено.
 
 const MATCH_URL = /\/cs2\/room\/(1-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const HISTORY_URL = /\/players\/[^/]+\/(stats\/|cs2\/history)/;
@@ -131,8 +132,25 @@ function playerSteamId(entry) {
     return entry?.gameId || entry?.game_player_id || entry?.steam_id_64 || entry?.steam_id64 || null;
 }
 
+// Логи [ELOUP] пишет только с флагом debug в chrome.storage.local — в пакете
+// для магазина консоль страницы чистая. Включить: DevTools попапа расширения →
+// chrome.storage.local.set({ debug: true })
+let debugEnabled = false;
+
+chrome.storage.local.get({ debug: false }, ({ debug }) => {
+    debugEnabled = Boolean(debug);
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.debug) {
+        debugEnabled = Boolean(changes.debug.newValue);
+    }
+});
+
 function debug(message) {
-    console.log(`[ELOUP] ${message}`);
+    if (debugEnabled) {
+        console.log(`[ELOUP] ${message}`);
+    }
 }
 
 // POST подписи — единственный эндпойнт, на котором FACEIT ставит капчу:
